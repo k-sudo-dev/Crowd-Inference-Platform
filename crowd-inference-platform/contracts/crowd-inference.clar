@@ -283,3 +283,70 @@
         })
     )
 )
+
+;; Extended Public functions
+
+;; Batch job creation
+;; #[allow(unchecked_data)]
+(define-public (create-batch-jobs 
+    (job-configs (list 20 {model-hash: (buff 32), input-hash: (buff 32), reward: uint, min-workers: uint})))
+    (let
+        ((batch-id (var-get batch-id-nonce))
+         (total-reward (fold + (map get-reward job-configs) u0)))
+        (try! (stx-transfer? total-reward tx-sender (as-contract tx-sender)))
+        (let
+            ((created-jobs (map create-single-job-from-config job-configs)))
+            (map-set batch-jobs batch-id
+                {
+                    job-ids: (filter-ok created-jobs),
+                    total-reward: total-reward,
+                    created-by: tx-sender
+                }
+            )
+            (var-set batch-id-nonce (+ batch-id u1))
+            (ok batch-id)
+        )
+    )
+)
+
+;; Helper function for batch creation
+(define-private (get-reward (config {model-hash: (buff 32), input-hash: (buff 32), reward: uint, min-workers: uint}))
+    (get reward config)
+)
+
+(define-private (create-single-job-from-config 
+    (config {model-hash: (buff 32), input-hash: (buff 32), reward: uint, min-workers: uint}))
+    (create-inference-job 
+        (get model-hash config)
+        (get input-hash config)
+        (get reward config)
+        (get min-workers config))
+)
+
+(define-private (filter-ok (results (list 20 (response uint uint))))
+    (unwrap-panic (ok (list)))
+)
+
+;; Add tags to jobs
+;; #[allow(unchecked_data)]
+(define-public (add-job-tag (job-id uint) (tag (string-ascii 50)))
+    (let
+        ((job (unwrap! (map-get? inference-jobs job-id) err-not-found)))
+        (asserts! (is-eq tx-sender (get requester job)) err-not-authorized)
+        (map-set job-tags {job-id: job-id, tag: tag} true)
+        (ok true)
+    )
+)
+
+;; Bulk verify submissions
+(define-public (bulk-verify-submissions 
+    (submissions (list 10 {submission-id: uint, quality-score: uint})))
+    (begin
+        (map verify-single-submission submissions)
+        (ok true)
+    )
+)
+
+(define-private (verify-single-submission (data {submission-id: uint, quality-score: uint}))
+    (verify-submission (get submission-id data) (get quality-score data))
+)
