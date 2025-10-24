@@ -186,3 +186,100 @@
         (ok true)
     )
 )
+
+;; Additional Data Maps for extended functionality
+(define-map job-disputes
+    uint
+    {
+        job-id: uint,
+        disputer: principal,
+        reason: (string-ascii 256),
+        resolved: bool,
+        resolution: (string-ascii 256)
+    }
+)
+
+(define-map worker-reputation
+    principal
+    {
+        reputation-score: uint,
+        positive-reviews: uint,
+        negative-reviews: uint,
+        disputed-submissions: uint
+    }
+)
+
+(define-map job-tags
+    {job-id: uint, tag: (string-ascii 50)}
+    bool
+)
+
+(define-map batch-jobs
+    uint
+    {
+        job-ids: (list 20 uint),
+        total-reward: uint,
+        created-by: principal
+    }
+)
+
+;; Additional constants
+(define-constant min-reputation-score u50)
+(define-constant max-dispute-time u1440) ;; blocks
+(define-constant err-insufficient-reputation (err u605))
+(define-constant err-dispute-expired (err u606))
+(define-constant err-already-disputed (err u607))
+
+;; Data variable for tracking
+(define-data-var dispute-id-nonce uint u0)
+(define-data-var batch-id-nonce uint u0)
+(define-data-var total-platform-fees uint u0)
+
+;; Extended Read-only functions
+(define-read-only (get-worker-reputation (worker principal))
+    (default-to {reputation-score: u100, positive-reviews: u0, negative-reviews: u0, disputed-submissions: u0}
+        (map-get? worker-reputation worker))
+)
+
+(define-read-only (get-dispute (dispute-id uint))
+    (map-get? job-disputes dispute-id)
+)
+
+(define-read-only (has-job-tag (job-id uint) (tag (string-ascii 50)))
+    (default-to false (map-get? job-tags {job-id: job-id, tag: tag}))
+)
+
+(define-read-only (get-batch-jobs (batch-id uint))
+    (map-get? batch-jobs batch-id)
+)
+
+(define-read-only (get-total-platform-fees)
+    (ok (var-get total-platform-fees))
+)
+
+(define-read-only (calculate-worker-reward 
+    (quality-score uint) 
+    (total-pool uint) 
+    (submissions-count uint))
+    (ok (/ (* total-pool quality-score) (* u100 submissions-count)))
+)
+
+(define-read-only (is-worker-eligible (worker principal))
+    (let
+        ((rep (get-worker-reputation worker)))
+        (ok (>= (get reputation-score rep) min-reputation-score))
+    )
+)
+
+(define-read-only (get-job-statistics (job-id uint))
+    (let
+        ((job (unwrap! (map-get? inference-jobs job-id) err-not-found)))
+        (ok {
+            total-submissions: (get submissions-count job),
+            reward-per-submission: (if (> (get submissions-count job) u0)
+                                     (/ (get reward-pool job) (get submissions-count job))
+                                     u0),
+            status: (get status job)
+        })
+    )
+)
