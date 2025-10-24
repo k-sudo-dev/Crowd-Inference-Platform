@@ -350,3 +350,117 @@
 (define-private (verify-single-submission (data {submission-id: uint, quality-score: uint}))
     (verify-submission (get submission-id data) (get quality-score data))
 )
+
+;; Submit dispute
+;; #[allow(unchecked_data)]
+(define-public (submit-dispute (job-id uint) (reason (string-ascii 256)))
+    (let
+        ((job (unwrap! (map-get? inference-jobs job-id) err-not-found))
+         (dispute-id (var-get dispute-id-nonce)))
+        (asserts! (has-participated job-id tx-sender) err-not-authorized)
+        (map-set job-disputes dispute-id
+            {
+                job-id: job-id,
+                disputer: tx-sender,
+                reason: reason,
+                resolved: false,
+                resolution: ""
+            }
+        )
+        (var-set dispute-id-nonce (+ dispute-id u1))
+        (ok dispute-id)
+    )
+)
+
+;; Resolve dispute (owner only)
+(define-public (resolve-dispute (dispute-id uint) (resolution (string-ascii 256)))
+    (let
+        ((dispute (unwrap! (map-get? job-disputes dispute-id) err-not-found)))
+        (asserts! (is-eq tx-sender contract-owner) err-owner-only)
+        (asserts! (not (get resolved dispute)) err-already-submitted)
+        (map-set job-disputes dispute-id
+            (merge dispute {resolved: true, resolution: resolution}))
+        (ok true)
+    )
+)
+
+;; Update worker reputation
+;; #[allow(unchecked_data)]
+(define-public (update-worker-reputation 
+    (worker principal) 
+    (positive bool))
+    (let
+        ((rep (get-worker-reputation worker))
+         (new-score (if positive 
+                       (+ (get reputation-score rep) u5)
+                       (if (>= (get reputation-score rep) u5) 
+                           (- (get reputation-score rep) u5) 
+                           u0))))
+        (if positive
+            (map-set worker-reputation worker
+                {
+                    reputation-score: (if (<= new-score u100) new-score u100),
+                    positive-reviews: (+ (get positive-reviews rep) u1),
+                    negative-reviews: (get negative-reviews rep),
+                    disputed-submissions: (get disputed-submissions rep)
+                })
+            (map-set worker-reputation worker
+                {
+                    reputation-score: new-score,
+                    positive-reviews: (get positive-reviews rep),
+                    negative-reviews: (+ (get negative-reviews rep) u1),
+                    disputed-submissions: (get disputed-submissions rep)
+                })
+        )
+        (ok true)
+    )
+)
+
+;; Withdraw unclaimed rewards
+(define-public (withdraw-unclaimed-rewards (job-id uint))
+    (let
+        ((job (unwrap! (map-get? inference-jobs job-id) err-not-found)))
+        (asserts! (is-eq tx-sender (get requester job)) err-not-authorized)
+        (asserts! (is-eq (get status job) "closed") err-not-authorized)
+        (try! (as-contract (stx-transfer? (get reward-pool job) tx-sender (get requester job))))
+        (ok true)
+    )
+)
+
+;; Extend job reward pool
+(define-public (extend-job-reward (job-id uint) (additional-reward uint))
+    (let
+        ((job (unwrap! (map-get? inference-jobs job-id) err-not-found)))
+        (asserts! (is-eq tx-sender (get requester job)) err-not-authorized)
+        (try! (stx-transfer? additional-reward tx-sender (as-contract tx-sender)))
+        (map-set inference-jobs job-id 
+            (merge job {reward-pool: (+ (get reward-pool job) additional-reward)}))
+        (ok true)
+    )
+)
+
+;; Slash worker for poor quality
+(define-public (slash-worker (worker principal) (amount uint))
+    (let
+        ((rep (get-worker-reputation worker)))
+        (asserts! (is-eq tx-sender contract-owner) err-owner-only)
+        (map-set worker-reputation worker
+            (merge rep {
+                reputation-score: (if (>= (get reputation-score rep) u10) 
+                                    (- (get reputation-score rep) u10) u0),
+                disputed-submissions: (+ (get disputed-submissions rep) u1)
+            }))
+        (ok true)
+    )
+)
+
+;; Reward top performers
+;; #[allow(unchecked_data)]
+(define-public (reward-top-worker (worker principal) (bonus uint))
+    (let
+        ((stats (get-worker-stats worker)))
+        (asserts! (is-eq tx-sender contract-owner) err-owner-only)
+        (try! (as-contract (stx-transfer? bonus tx-sender worker)))
+        (ok true)
+    )
+)
