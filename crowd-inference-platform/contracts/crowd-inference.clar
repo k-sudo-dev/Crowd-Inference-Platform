@@ -101,3 +101,88 @@
         (ok new-id)
     )
 )
+
+;; #[allow(unchecked_data)]
+(define-public (submit-inference (job-id uint) (output-hash (buff 32)))
+    (let
+        ((job (unwrap! (map-get? inference-jobs job-id) err-not-found))
+         (new-submission-id (var-get submission-id-nonce)))
+        (asserts! (is-eq (get status job) "open") err-not-authorized)
+        (asserts! (not (has-participated job-id tx-sender)) err-already-submitted)
+        (map-set worker-submissions new-submission-id
+            {
+                job-id: job-id,
+                worker: tx-sender,
+                output-hash: output-hash,
+                quality-score: u0,
+                verified: false,
+                paid: false,
+                timestamp: stacks-block-height
+            }
+        )
+        (map-set worker-participation {job-id: job-id, worker: tx-sender} true)
+        (map-set inference-jobs job-id
+            (merge job {submissions-count: (+ (get submissions-count job) u1)}))
+        (var-set submission-id-nonce (+ new-submission-id u1))
+        (ok new-submission-id)
+    )
+)
+
+;; #[allow(unchecked_data)]
+(define-public (verify-submission (submission-id uint) (quality-score uint))
+    (let
+        ((submission (unwrap! (map-get? worker-submissions submission-id) err-not-found))
+         (job (unwrap! (map-get? inference-jobs (get job-id submission)) err-not-found)))
+        (asserts! (is-eq tx-sender (get requester job)) err-not-authorized)
+        (asserts! (<= quality-score u100) err-invalid-quality)
+        (map-set worker-submissions submission-id
+            (merge submission {quality-score: quality-score, verified: true}))
+        (ok true)
+    )
+)
+
+(define-public (distribute-rewards (submission-id uint))
+    (let
+        ((submission (unwrap! (map-get? worker-submissions submission-id) err-not-found))
+         (job (unwrap! (map-get? inference-jobs (get job-id submission)) err-not-found))
+         (reward-amount (/ (* (get reward-pool job) (get quality-score submission)) 
+                          (* u100 (get submissions-count job))))
+         (worker-stat (get-worker-stats (get worker submission))))
+        (asserts! (is-eq tx-sender (get requester job)) err-not-authorized)
+        (asserts! (get verified submission) err-not-authorized)
+        (asserts! (not (get paid submission)) err-already-submitted)
+        (try! (as-contract (stx-transfer? reward-amount tx-sender (get worker submission))))
+        (map-set worker-submissions submission-id (merge submission {paid: true}))
+        (map-set worker-stats (get worker submission)
+            {
+                total-jobs: (+ (get total-jobs worker-stat) u1),
+                total-earned: (+ (get total-earned worker-stat) reward-amount),
+                avg-quality: (/ (+ (* (get avg-quality worker-stat) (get total-jobs worker-stat)) 
+                                   (get quality-score submission))
+                               (+ (get total-jobs worker-stat) u1))
+            }
+        )
+        (ok true)
+    )
+)
+
+(define-public (close-job (job-id uint))
+    (let
+        ((job (unwrap! (map-get? inference-jobs job-id) err-not-found)))
+        (asserts! (is-eq tx-sender (get requester job)) err-not-authorized)
+        (map-set inference-jobs job-id (merge job {status: "closed"}))
+        (ok true)
+    )
+)
+
+;; Cancel job (before any submissions)
+(define-public (cancel-job (job-id uint))
+    (let
+        ((job (unwrap! (map-get? inference-jobs job-id) err-not-found)))
+        (asserts! (is-eq tx-sender (get requester job)) err-not-authorized)
+        (asserts! (is-eq (get submissions-count job) u0) err-not-authorized)
+        (try! (as-contract (stx-transfer? (get reward-pool job) tx-sender (get requester job))))
+        (map-set inference-jobs job-id (merge job {status: "cancelled"}))
+        (ok true)
+    )
+)
